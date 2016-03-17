@@ -1,0 +1,211 @@
+################################################################################
+### commands for preprocessing the movie reviews with pyspark on the cluster ###
+################################################################################
+
+# this supposes that the file has been uploaded to the cluster (on your home folder)
+
+# launch pyspark session
+pyspark --master yarn-client --num-executors 16 --driver-memory 1g --executor-memory 1g
+
+# create corpus as a distributed file (RDD) across the 16 cores
+corpus=sc.textFile("all_reviews.txt",16)
+
+# return size of corpus
+corpus.count()
+
+# equivalent approach
+len(corpus.collect())
+
+# inspect first element
+corpus.first()
+
+# there are 100,000 elements (lines) - each one corresponds to a movie review
+
+# load all required modules and functions
+
+from bs4 import BeautifulSoup
+import re
+
+# function that cleans each single line and returns a list of tokens from it
+# (each line in the text file corresponds to a single movie review)
+
+def line_to_tokens(line):
+    # clean HTML  
+    review_text = BeautifulSoup(line).get_text()
+    # remove non-letters
+    review_text = re.sub("[^a-zA-Z]"," ", review_text)
+    # convert words to lower case and split them
+    words = review_text.lower().split()    
+    # return a list of words
+    return(words)
+
+# apply line_to_tokens() to each movie review
+corpus_processed = corpus.map(lambda x: line_to_tokens(x))
+
+# sanity checks (since the above evaluation is lazy)
+corpus_processed.count()
+corpus_processed.first()
+
+# remove all reviews (11) that are less than 10 words in length
+# (to be able to use a window of size 10 if needed)
+corpus_processed_filtered = corpus_processed.filter(lambda x: len(x)>10)
+# sanity check
+corpus_processed_filtered.count()
+
+####################################################################
+### commands for building a graph-of-words for each movie review ###
+####################################################################
+
+import operator
+import igraph
+import time
+import itertools
+
+def terms_to_graph(terms, w):
+    # This function returns a graph from a list of ordered terms.
+    # Edges are weighted based on term co-occurence within a fixed-size sliding window
+    t = time.time()
+    counter = 0
+    from_to = {}
+    # create initial graph (first w terms)
+    terms_temp = terms[0:w]
+    indexes = list(itertools.combinations(range(w), r=2))
+    new_edges = list()
+    for i in xrange(len(indexes)):
+        new_edges.append(" ".join(list(terms_temp[i] for i in indexes[i]))) 
+    for i in xrange(0,len(new_edges)):
+        from_to[new_edges[i].split()[0],new_edges[i].split()[1]] = 1
+    # then iterate over the remaining terms
+    for i in xrange(w, len(terms)):
+        counter += 1
+        # term to consider
+        considered_term = terms[i]
+        # all terms within sliding window
+        terms_temp = terms[(i-w+1):(i+1)]
+        # edges to try
+        candidate_edges = list()
+        for p in xrange(w-1):
+            candidate_edges.append((terms_temp[p],considered_term))
+        for try_edge in candidate_edges:
+            # if not self-edge
+            if (try_edge[1] != try_edge[0]):
+                boolean1 = (try_edge[0],try_edge[1]) in from_to  
+                boolean2 = (try_edge[1],try_edge[0]) in from_to
+                # if edge has already been seen, update its weight
+                if boolean1:
+                    from_to[try_edge[0],try_edge[1]] += 1
+                elif boolean2:
+                    from_to[try_edge[1],try_edge[0]] += 1
+                # if edge has never been seen, create it and assign it a unit weight     
+                else:
+                    from_to[try_edge] = 1
+        if counter % 10000 == 0:
+            print counter, 'terms have been processed in', (time.time() - t)
+    print 'creating graph'    
+    # create empty graph
+    g = igraph.Graph(directed=True)
+    # add vertices
+    g.add_vertices(sorted(set(terms)))
+    # add edges, direction is preserved since the graph is directed
+    g.add_edges(from_to.keys())
+    # set edge and vertice weights
+    g.es["weight"] = from_to.values() # based on co-occurence within sliding window
+    g.vs["weight"] = g.strength(weights=from_to.values()) # weighted degree
+    return(g)
+
+# build a gow with window 10 for each movie review, get result as RDD
+graphs_10 = corpus_processed_filtered.map(lambda x: terms_to_graph(x,10))
+
+# inspect first three elements (number of edges, number of nodes)
+test = graphs_10.take(3)
+
+for test_temp in test:
+    print len(test_temp.es),len(test_temp.vs)
+
+	
+# ***************************************************************************
+# below are some attempts to merge the graphs using the igraph union function
+# these attempts have been unsuccessful so far
+	
+test[0]
+	
+test_union = igraph.Graph.union(test[0],test[1])
+len(test_union.es)
+len(test_union.vs)
+
+test_union_bis = test[0].union(test[1])
+len(test_union_bis.es)
+len(test_union_bis.vs)
+
+names_0 = test[0].vs['name']
+names_1 = test[1].vs['name']
+len(names_0)
+len(names_1)
+
+# get intersection of two name lists
+common_names = [name for name in names_0 if name in names_1]
+len(common_names)
+
+# the real length of the union should be
+len(set(names_0 + names_1))
+
+g1 = igraph.Graph.Erdos_Renyi(n=5, m=10)
+g1.vs['name'] = ["A","B","C","D","E"]
+g1.es
+
+# ***********************************************************
+# below are some old commands corresponding to old strategies
+# I need to clean that 
+
+
+# collect RDD as list
+graphs_10_collect=corpus_processed_filtered.map(lambda x: terms_to_graph(x,10)).collect()
+
+
+test=graphs_10_collect[0].igraph.Graph.union(graphs_10_collect[1])
+igraph.Graph.union([graphs_10_collect[0],graphs_10_collect[1],graphs_10_collect[3]])
+
+=corpus_processed_filtered.map(lambda x: terms_to_graph(x,10)).collect()
+
+
+big_graph_total=graphs_10.fold(igraph.Graph(directed=True),lambda x,y :igraph.Graph.union(x,y))
+
+len(graphs_10.first().es)
+len(graphs_10.first().vs)
+
+len(graphs_10_collect..es)
+len(graphs_10.first().vs)
+
+# function that performs the union of all the graphs in a list into a big graph
+def my_graph_union(my_list):
+    big_graph = my_list[0]
+    for graph in my_list[1:]:
+        big_graph=igraph.Graph.union(big_graph,graph)
+    return(big_graph)
+
+sc.parallelize(graphs_10,
+	
+# get list of 16 big graphs
+big_graphs = sc.parallelize(graphs_10,16).mapPartitions(my_graph_union).collect()
+	
+big_graphs = graphs_10.mapPartitions(lambda x: igraph.Graph.union(x), preservesPartitioning=True)
+
+
+# should return 'list' and '99989'
+type(graphs_10)
+len(graphs_10)
+
+# number of vertices should match:
+# len(set(corpus_processed_filtered.first()))
+# which is the number of unique terms in the first review
+
+len(testtest.es)
+len(testtest.vs)
+
+len(big_graph_total.es)
+len(big_graph_total.vs)
+
+# get stats of final graph
+
+len(big_graph.vs)
+len(big_graph.es)
